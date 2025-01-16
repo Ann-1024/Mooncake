@@ -1,35 +1,23 @@
 # vLLM Disaggregated Prefill/Decode Demo
 
 ## Overview
-Currently, we support mooncake-transfer-engine integration with the vLLM project based on [PR 8498](https://github.com/vllm-project/vllm/pull/8498) (vllm version: v0.6.2) to accelerate KVCache transfer for inter-node disaggregated Prefill/Decode scenario ([Benchmark results](vllm-benchmark-results.md)). In the future, we will bypass PR 8498, release a disaggregated KVStore, and fully integrate it with the vLLM Prefix Caching feature to support multi-instance KVCache Sharing.
+This is the latest version of mooncake-transfer-engine integration doc with the vLLM project based on [PR 10502](https://github.com/vllm-project/vllm/pull/10502) and [PR 10884](https://github.com/vllm-project/vllm/pull/10884) (vllm version: v0.6.4.post1/main) to accelerate KVCache transfer for inter-node disaggregated Prefill/Decode scenario. We have run some experiments to obtain some [preview benchmark results](vllm-benchmark-results-v0.2.md). More benchmark results will be released in due time.
 
-![vllm-integration-demo](../../image/vllm-integration-demo.gif)
+**_Please note that this is still an experimental version and will be modified anytime based on feedback from the vLLM community._**
 
 ## Installation
 ### Prerequisite
 Please install the Mooncake Transfer Engine according to the [instructions](build.md) first.
 
-### Install an experimental version of vLLM
-#### 1. Clone vLLM from an indicated repo
+### Install the latest version of vLLM
+#### 1. Clone vLLM from official repo
 ```bash
-git clone git@github.com:kvcache-ai/vllm.git
+git clone git@github.com:vllm-project/vllm.git
 ```
-#### 2. Build (Choose one of the following options)
-##### 2.1 vLLM Python-only build (without compilation)
+#### 2. Build
+##### 2.1 Build from source (Include C++ and CUDA code)
 ```bash
 cd vllm
-git checkout mooncake-integration
-pip3 uninstall vllm -y
-pip3 install vllm==0.6.2
-pip3 uninstall torchvision -y
-python3 python_only_dev.py
-```
- - **Once you have finished editing or want to install another vLLM wheel, you should exit the development environment using `python3 python_only_dev.py --quit-dev`**
-
-##### 2.2 Build from source (Include C++ and CUDA code)
-```bash
-cd vllm
-git checkout mooncake-integration
 pip3 uninstall vllm -y
 pip3 install -e .
 ```
@@ -47,6 +35,7 @@ pip3 install -e .
   "prefill_url": "192.168.0.137:13003",
   "decode_url": "192.168.0.139:13003",
   "metadata_server": "192.168.0.139:2379",
+  "metadata_backend": "etcd",
   "protocol": "rdma",
   "device_name": "erdma_0"
 }
@@ -55,10 +44,14 @@ pip3 install -e .
   - The port in the URL is used to communicate with etcd server for metadata.
 - "decode_url": The IP address and port of the Decode node.
   - The port in the URL is used to communicate with etcd server for metadata.
-- "metadata_server": The etcd server of mooncake transfer engine.
+  - **_If you want to run the prefill instance and decode instance on the same node, please set up a different port for the `decode_url`. To avoid port conflicts, ensure that the port number differs by at least 50 from the port number in `prefill_url`. For example, "decode_url": "192.168.0.137:13103". Please note that if you set up the same URL for both instances, we will automatically add 100 to the port of the `decode_url`._**
+- "metadata_server": The etcd server of the mooncake transfer engine. For examples,
+  - Use `etcd` as backend: `"192.168.0.137:2379"`, `"etcd://192.168.0.137:2379"` or `"etcd://192.168.0.137:2379,192.168.0.138:2379"`
+  - Use `redis` as backend: `"redis://192.168.0.137:6379"`
+  - Use `http` as backend: `"http://192.168.0.137:8080/metadata"`
+- "metadata_backend": Currently we support "etcd", "redis", and "http" backends. If this parameter is absent and the `metadata_server` is not a complete URL with the backend prefix, the mooncake transfer engine will use "etcd" automatically. Please note that this parameter will be deprecated in the next version, we recommend you provide a complete URL for `metadata_server` with the prefix of the target backend.
 - "protocol": The protocol to be used for data transmission. ("rdma/tcp")
-- "device_name": The device to be used for data transmission, required when "protocol" is set to "rdma". If multiple NIC devices are used, they can be separated by commas such as "erdma_0,erdma_1". Please note that there are no spaces between them.
-
+- "device_name": The device to be used for data transmission, it is required when "protocol" is set to "rdma". If multiple NIC devices are used, they can be separated by commas such as "erdma_0,erdma_1". Please note that there are no spaces between them.
 
 ### Prepare configuration file to Run Example over TCP
 
@@ -68,6 +61,7 @@ pip3 install -e .
   "prefill_url": "192.168.0.137:13003",
   "decode_url": "192.168.0.139:13003",
   "metadata_server": "192.168.0.139:2379",
+  "metadata_backend": "etcd",
   "protocol": "tcp",
   "device_name": ""
 }
@@ -84,22 +78,28 @@ etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://loc
 # You may need to terminate other etcd processes before running the above command
 
 # 2. Run on the prefilling side (producer role)
-VLLM_HOST_IP="192.168.0.137" VLLM_PORT="51000" MASTER_ADDR="192.168.0.137" MASTER_PORT="54324" MOONCAKE_CONFIG_PATH=./mooncake.json VLLM_DISTRIBUTED_KV_ROLE=producer VLLM_USE_MODELSCOPE=True python3 -m vllm.entrypoints.openai.api_server --model Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4 --port 8100 --max-model-len 10000 --gpu-memory-utilization 0.95
+MOONCAKE_CONFIG_PATH=./mooncake.json VLLM_USE_MODELSCOPE=True python3 -m vllm.entrypoints.openai.api_server --model Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4 --port 8100 --max-model-len 10000 --gpu-memory-utilization 0.8 --kv-transfer-config '{"kv_connector":"MooncakeConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2,"kv_buffer_size":2e9}'
 
 # 3. Run on the decoding side (consumer role)
-VLLM_HOST_IP="192.168.0.137" VLLM_PORT="51000" MASTER_ADDR="192.168.0.137" MASTER_PORT="54324" MOONCAKE_CONFIG_PATH=./mooncake.json VLLM_DISTRIBUTED_KV_ROLE=consumer VLLM_USE_MODELSCOPE=True python3 -m vllm.entrypoints.openai.api_server --model Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4 --port 8200 --max-model-len 10000 --gpu-memory-utilization 0.95
+MOONCAKE_CONFIG_PATH=./mooncake.json VLLM_USE_MODELSCOPE=True python3 -m vllm.entrypoints.openai.api_server --model Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4 --port 8200 --max-model-len 10000 --gpu-memory-utilization 0.8 --kv-transfer-config '{"kv_connector":"MooncakeConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2,"kv_buffer_size":2e9}'
 ```
 
-- `VLLM_HOST_IP` and `VLLM_PORT` are used for vLLM's internal communication in distributed environments.
-- `MASTER_ADDR` and `MASTER_PORT` are used to specify the IP address and port of the master node in a distributed setup.
-  - **_Be sure to set up the same `MASTER_ADDR` and same `MASTER_PORT` on each node (either prefill instance IP or decode instance IP is ok)._**
 - `MOONCAKE_CONFIG_PATH` is the path to the mooncake.json configuration file.
-- `VLLM_DISTRIBUTED_KV_ROLE` is the node's role, either 'producer' or 'consumer'.
 - `VLLM_USE_MODELSCOPE` is optional, if you have access to huggingface, please remove it.
 - The `--model` parameter specifies the model to use.
 - The `--port` parameter specifies the vllm service port on which to listen.
 - The `--max-model-len` parameter specifies the maximum length of the model.
-- Currently, option `--tensor_parallel_size` \ `-tp` is not supported for inter-node disaggregated scenario due to the `parallel_state` initialization process of `disagg_group` in conflict with vllm's `process_group`. This issue will be addressed in the next patch with the help of (https://github.com/vllm-project/vllm/pull/10072) and (https://github.com/vllm-project/vllm/pull/10275). Stay tuned.
+- Option `--tensor_parallel_size` \ `-tp` is supported now. Example: append `-tp 2` to the run command to run vllm with multiple GPUs.
+  - If you want to run the prefill instance and decode instance on the same node, please set up different `CUDA_VISIBLE_DEVICES`. For example, `CUDA_VISIBLE_DEVICES=0,1` for the prefill instance and `CUDA_VISIBLE_DEVICES=2,3` for the decode instance.
+
+- The `--kv-transfer-config` parameter specifies the connector and its config to be used.
+  - Please set up `kv_connector` to `MooncakeConnector`.
+  - `kv_role` is the node's role, either 'kv_producer' or 'kv_consumer'.
+  - `kv_rank` is the rank of the instance. Currently, `kv_producer`'s rank is 0, `kv_consumer`'s rank is 1.
+  - `kv_parallel_size` is fixed to 2 currently.
+  - `kv_buffer_size` is the size of the KVCache lookup buffer, if the average `input_len` of the prompt is large, please increase the buffer size. If the OOM still occurs, please decrease the ratio of `--gpu-memory-utilization`.
+  - `kv_ip` and `kv_port` are used to specify the IP address and port of the master node for "PyNcclConnector" distributed setup. It is not used for "MooncakeConnector" currently. Instead, "MooncakeConnector" uses a config file to set up the distributed connection. Therefore, you don't need to set these params for "MooncakeConnector" currently.
+
 ```bash
 # 4. Start the proxy server on one node (Let's take the prefill node as an example)
 python3 proxy_server.py

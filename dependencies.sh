@@ -14,11 +14,12 @@
 # limitations under the License.
 
 REPO_ROOT=`pwd`
-GITHUB_PROXY="https://mirror.ghproxy.com/github.com"
+GITHUB_PROXY="https://github.com"
 
 sudo apt-get install -y build-essential \
                         cmake \
                         libibverbs-dev \
+                        libunwind-dev \
                         libgoogle-glog-dev \
                         libgtest-dev \
                         libjsoncpp-dev \
@@ -30,7 +31,9 @@ sudo apt-get install -y build-essential \
                         libgrpc++-dev \
                         libprotobuf-dev \
                         protobuf-compiler-grpc \
-                        pybind11-dev
+                        pybind11-dev \
+                        libcurl4-openssl-dev \
+                        libhiredis-dev
 
 echo "*** Download and installing [cpprest sdk] ***"
 mkdir ${REPO_ROOT}/thirdparties
@@ -50,5 +53,9 @@ mkdir -p build
 cd build
 cmake ..
 make -j$(nproc) && sudo make install
+
+echo "*** Download and installing [golang-1.22] ***"
+wget https://go.dev/dl/go1.22.linux-amd64.tar.gz
+sudo tar -C /usr/local -xzf go1.22.linux-amd64.tar.gz
 
 echo "*** Dependencies Installed! ***"

@@ -1,7 +1,7 @@
 # P2P Store
 
 ## Overview
-P2P Store is built on [Transfer Engine](transfer-engine.md) and supports the temporary sharing of objects between peer nodes in a cluster, with typical scenarios including checkpoint distribution, etc. P2P Store is a client-only architecture with no centralized master node; global metadata is maintained by the etcd service. P2P Store is now used in Moonshot AI's checkpoint transfer service.
+P2P Store is built on [Transfer Engine](transfer-engine.md) and supports the temporary sharing of objects between peer nodes in a cluster, with typical scenarios including checkpoint distribution, etc. P2P Store is a client-only architecture with no centralized master node; global metadata is maintained by the metadata service. P2P Store is now used in Moonshot AI's checkpoint transfer service.
 
 P2P Store provides several interfaces like `Register` and `GetReplica`. A `Register` is equivalent to seeding in BitTorrent, where a local file is registered with the global metadata without any data transfer occurring; it merely registers metadata in etcd. A `GetReplica` searches metadata and clones data from other machines that have called Register or Get (unless explicitly calling `Unregister` or `DeleteReplica` to stop pulling files from the local machine), and it can also act as a data source to improve the efficiency of data transfer for other nodes. This approach can increase the efficiency of large-scale data distribution and avoid the outbound bandwidth saturation.
 
@@ -42,7 +42,7 @@ func NewP2PStore(metadataUri string, localSegmentName string, nicPriorityMatrix 
 Creates an instance of `P2PStore`, which internally starts a Transfer Engine service.
 - `metadataUri`: The hostname or IP address of the metadata server/etcd service.
 - `localSegmentName`: The local server name (hostname/IP address:port), ensuring uniqueness within the cluster.
-- `nicPriorityMatrix`: The network interface card priority order matrix, see the related description in the Transfer Engine API documentation (`TransferEngine::installOrGetTransport`).
+- `nicPriorityMatrix`: The network interface card priority order matrix, see the related description in the Transfer Engine API documentation (`TransferEngine::installTransport`).
 - Return value: If successful, returns a pointer to the `P2PStore` instance, otherwise returns `error`.
 
 ```go

@@ -32,6 +32,8 @@ This document describes how to build Mooncake.
 - googletest: 1.12.x
 - gcc: 10.2.1
 - go: 1.19+
+- hiredis
+- curl
 
 ### Steps
 
@@ -45,6 +47,8 @@ This document describes how to build Mooncake.
                    libgtest-dev \
                    libjsoncpp-dev \
                    libnuma-dev \
+                   libcurl4-openssl-dev \
+                   libhiredis-dev
 
     # For centos/alibaba linux os
     yum install cmake \
@@ -57,6 +61,8 @@ This document describes how to build Mooncake.
                 boost-devel \
                 openssl-devel \
                 protobuf-devel \
+                hiredis-devel \
+                libcurl-devel \
                 protobuf-compiler 
     ```
     NOTE: You may need to install gtest, glog, gflags from source code:
@@ -142,3 +148,5 @@ Mooncake supports the following advanced compile options:
 - `-DUSE_CXL=[ON|OFF]`: Enable CXL protocols. 
 - `-DWITH_P2P_STORE=[ON|OFF]`: Enable Golang support and build P2P Store. 
 - `-DWITH_WITH_RUST_EXAMPLE=[ON|OFF]`: Enable Rust language support.
+- `-DUSE_REDIS=[ON|OFF]`: Enable Redis as metadata server in Mooncake (`hiredis` required).
+- `-DUSE_HTTP=[ON|OFF]`: Enable Http as metadata server in Mooncake (`curl` required).

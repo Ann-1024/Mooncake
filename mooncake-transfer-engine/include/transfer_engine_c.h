@@ -85,13 +85,21 @@ typedef struct segment_desc segment_desc_t;
 typedef void *transfer_engine_t;
 typedef void *transport_t;
 
-transfer_engine_t createTransferEngine(const char *metadata_uri);
+/*
+ * All memory pointed to by the "char *" parameters will not be used
+ * after the C function returns.
+ * This means that the caller can free the memory pointed to by "char *"
+ * parameters, after the call is completed.
+ * All the C functions here follow this convention.
+*/
 
-int initTransferEngine(transfer_engine_t engine, const char *local_server_name,
-                       const char *connectable_name, uint64_t rpc_port);
+transfer_engine_t createTransferEngine(const char *metadata_conn_string,
+                                       const char *local_server_name,
+                                       const char *ip_or_host_name,
+                                       uint64_t rpc_port);
 
-transport_t installOrGetTransport(transfer_engine_t engine, const char *proto,
-                                  void **args);
+transport_t installTransport(transfer_engine_t engine, const char *proto,
+                             void **args);
 
 int uninstallTransport(transfer_engine_t engine, const char *proto);
 
@@ -113,15 +121,15 @@ int registerLocalMemoryBatch(transfer_engine_t engine,
 int unregisterLocalMemoryBatch(transfer_engine_t engine, void **addr_list,
                                size_t addr_len);
 
-batch_id_t allocateBatchID(transport_t xport, size_t batch_size);
+batch_id_t allocateBatchID(transfer_engine_t engine, size_t batch_size);
 
-int submitTransfer(transport_t xport, batch_id_t batch_id,
+int submitTransfer(transfer_engine_t engine, batch_id_t batch_id,
                    struct transfer_request *entries, size_t count);
 
-int getTransferStatus(transport_t xport, batch_id_t batch_id, size_t task_id,
-                      struct transfer_status *status);
+int getTransferStatus(transfer_engine_t engine, batch_id_t batch_id,
+                      size_t task_id, struct transfer_status *status);
 
-int freeBatchID(transport_t xport, batch_id_t batch_id);
+int freeBatchID(transfer_engine_t engine, batch_id_t batch_id);
 
 int syncSegmentCache(transfer_engine_t engine);
 

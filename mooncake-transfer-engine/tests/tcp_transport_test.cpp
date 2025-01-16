@@ -22,13 +22,32 @@
 #include <iomanip>
 #include <memory>
 
+#ifdef USE_CUDA
+#include <bits/stdint-uintn.h>
+#include <cuda_runtime.h>
+#include <cufile.h>
+
+#include <cassert>
+
+static void checkCudaError(cudaError_t result, const char *message) {
+    if (result != cudaSuccess) {
+        LOG(ERROR) << message << " (Error code: " << result << " - "
+                   << cudaGetErrorString(result) << ")" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+}
+
+#endif
+
 #include "transfer_engine.h"
 #include "transport/transport.h"
 
+#ifdef USE_CUDA
+DEFINE_int32(gpu_id, 0, "GPU ID to use");
+#endif
+
 using namespace mooncake;
 
-//// etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls
-/// http://10.0.0.1:2379 / ./tcp_transport_test
 namespace mooncake {
 
 class TCPTransportTest : public ::testing::Test {
@@ -37,40 +56,44 @@ class TCPTransportTest : public ::testing::Test {
     void SetUp() override {
         google::InitGoogleLogging("TCPTransportTest");
         FLAGS_logtostderr = 1;
+
+        const char *env = std::getenv("MC_METADATA_SERVER");
+        if (env)
+            metadata_server = env;
+        else
+            metadata_server = metadata_server;
+        LOG(INFO) << "metadata_server: " << metadata_server;
+
+        env = std::getenv("MC_LOCAL_SERVER_NAME");
+        if (env)
+            local_server_name = env;
+        else
+            local_server_name = "127.0.0.2:12345";
+        LOG(INFO) << "local_server_name: " << local_server_name;
     }
 
     void TearDown() override {
         // 清理 glog
         google::ShutdownGoogleLogging();
     }
+
+    std::string metadata_server;
+    std::string local_server_name;
 };
 
 static void *allocateMemoryPool(size_t size, int socket_id,
                                 bool from_vram = false) {
-#ifdef USE_CUDA
-    if (from_vram) {
-        int gpu_id = FLAGS_gpu_id;
-        void *d_buf;
-        checkCudaError(cudaSetDevice(gpu_id), "Failed to set device");
-        checkCudaError(cudaMalloc(&d_buf, size),
-                       "Failed to allocate device memory");
-        return d_buf;
-    }
-#endif
     return numa_alloc_onnode(size, socket_id);
 }
 
 TEST_F(TCPTransportTest, GetTcpTest) {
-    auto metadata_client = std::make_shared<TransferMetadata>("127.0.0.1:2379");
-    LOG_ASSERT(metadata_client);
-
-    auto engine = std::make_unique<TransferEngine>(metadata_client);
-
-    auto hostname_port = parseHostNameWithPort("127.0.0.2:12345");
-    engine->init("127.0.0.2:12345", hostname_port.first.c_str(),
-                 hostname_port.second);
+    auto engine = std::make_unique<TransferEngine>();
+    auto hostname_port = parseHostNameWithPort(local_server_name);
+    auto rc = engine->init(metadata_server, local_server_name,
+                           hostname_port.first.c_str(), hostname_port.second);
+    LOG_ASSERT(rc == 0);
     Transport *xport = nullptr;
-    xport = engine->installOrGetTransport("tcp", nullptr);
+    xport = engine->installTransport("tcp", nullptr);
     LOG_ASSERT(xport != nullptr);
 }
 
@@ -78,46 +101,43 @@ TEST_F(TCPTransportTest, Writetest) {
     const size_t kDataLength = 4096000;
     void *addr = nullptr;
     const size_t ram_buffer_size = 1ull << 30;
-    auto metadata_client = std::make_shared<TransferMetadata>("127.0.0.1:2379");
-    LOG_ASSERT(metadata_client);
-
-    auto engine = std::make_unique<TransferEngine>(metadata_client);
-
-    auto hostname_port = parseHostNameWithPort("127.0.0.2:12345");
-    engine->init("127.0.0.2:12345", hostname_port.first.c_str(),
-                 hostname_port.second);
+    auto engine = std::make_unique<TransferEngine>();
+    auto hostname_port = parseHostNameWithPort(local_server_name);
+    auto rc = engine->init(metadata_server, local_server_name,
+                           hostname_port.first.c_str(), hostname_port.second);
+    LOG_ASSERT(rc == 0);
     Transport *xport = nullptr;
-    xport = engine->installOrGetTransport("tcp", nullptr);
+    xport = engine->installTransport("tcp", nullptr);
     LOG_ASSERT(xport != nullptr);
 
     addr = allocateMemoryPool(ram_buffer_size, 0, false);
-    int rc = engine->registerLocalMemory(addr, ram_buffer_size, "cpu:0");
+    rc = engine->registerLocalMemory(addr, ram_buffer_size, "cpu:0");
     LOG_ASSERT(!rc);
 
     for (size_t offset = 0; offset < kDataLength; ++offset)
         *((char *)(addr) + offset) = 'a' + lrand48() % 26;
-    auto batch_id = xport->allocateBatchID(1);
+    auto batch_id = engine->allocateBatchID(1);
     int ret = 0;
-    auto segment_id = engine->openSegment("127.0.0.2:12345");
+    auto segment_id = engine->openSegment(local_server_name);
     TransferRequest entry;
-    auto segment_desc = xport->meta()->getSegmentDescByID(segment_id);
+    auto segment_desc = engine->getMetadata()->getSegmentDescByID(segment_id);
     uint64_t remote_base = (uint64_t)segment_desc->buffers[0].addr;
     entry.opcode = TransferRequest::WRITE;
     entry.length = kDataLength;
     entry.source = (uint8_t *)(addr);
     entry.target_id = segment_id;
     entry.target_offset = remote_base;
-    ret = xport->submitTransfer(batch_id, {entry});
+    ret = engine->submitTransfer(batch_id, {entry});
     LOG_ASSERT(!ret);
     bool completed = false;
     TransferStatus status;
     while (!completed) {
-        int ret = xport->getTransferStatus(batch_id, 0, status);
+        int ret = engine->getTransferStatus(batch_id, 0, status);
         ASSERT_EQ(ret, 0);
         LOG_ASSERT(status.s != TransferStatusEnum::FAILED);
         if (status.s == TransferStatusEnum::COMPLETED) completed = true;
     }
-    ret = xport->freeBatchID(batch_id);
+    ret = engine->freeBatchID(batch_id);
     ASSERT_EQ(ret, 0);
 }
 
@@ -125,16 +145,12 @@ TEST_F(TCPTransportTest, WriteAndReadtest) {
     const size_t kDataLength = 4096000;
     void *addr = nullptr;
     const size_t ram_buffer_size = 1ull << 30;
-    auto metadata_client = std::make_shared<TransferMetadata>("127.0.0.1:2379");
-    LOG_ASSERT(metadata_client);
-
-    auto engine = std::make_unique<TransferEngine>(metadata_client);
-
-    auto hostname_port = parseHostNameWithPort("127.0.0.2:12345");
-    engine->init("127.0.0.2:12345", hostname_port.first.c_str(),
-                 hostname_port.second);
+    auto engine = std::make_unique<TransferEngine>();
+    auto hostname_port = parseHostNameWithPort(local_server_name);
+    engine->init(metadata_server, local_server_name,
+                 hostname_port.first.c_str(), hostname_port.second);
     Transport *xport = nullptr;
-    xport = engine->installOrGetTransport("tcp", nullptr);
+    xport = engine->installTransport("tcp", nullptr);
     LOG_ASSERT(xport != nullptr);
 
     addr = allocateMemoryPool(ram_buffer_size, 0, false);
@@ -143,11 +159,11 @@ TEST_F(TCPTransportTest, WriteAndReadtest) {
     for (size_t offset = 0; offset < kDataLength; ++offset)
         *((char *)(addr) + offset) = 'a' + lrand48() % 26;
 
-    auto segment_id = engine->openSegment("127.0.0.2:12345");
-    auto segment_desc = xport->meta()->getSegmentDescByID(segment_id);
+    auto segment_id = engine->openSegment(local_server_name);
+    auto segment_desc = engine->getMetadata()->getSegmentDescByID(segment_id);
     uint64_t remote_base = (uint64_t)segment_desc->buffers[0].addr;
     {
-        auto batch_id = xport->allocateBatchID(1);
+        auto batch_id = engine->allocateBatchID(1);
         int ret = 0;
         TransferRequest entry;
         entry.opcode = TransferRequest::WRITE;
@@ -155,22 +171,22 @@ TEST_F(TCPTransportTest, WriteAndReadtest) {
         entry.source = (uint8_t *)(addr);
         entry.target_id = segment_id;
         entry.target_offset = remote_base;
-        ret = xport->submitTransfer(batch_id, {entry});
+        ret = engine->submitTransfer(batch_id, {entry});
         LOG_ASSERT(!ret);
         bool completed = false;
         TransferStatus status;
         while (!completed) {
-            int ret = xport->getTransferStatus(batch_id, 0, status);
+            int ret = engine->getTransferStatus(batch_id, 0, status);
             ASSERT_EQ(ret, 0);
             LOG_ASSERT(status.s != TransferStatusEnum::FAILED);
             if (status.s == TransferStatusEnum::COMPLETED) completed = true;
         }
-        ret = xport->freeBatchID(batch_id);
+        ret = engine->freeBatchID(batch_id);
         ASSERT_EQ(ret, 0);
     }
 
     {
-        auto batch_id = xport->allocateBatchID(1);
+        auto batch_id = engine->allocateBatchID(1);
         int ret = 0;
 
         TransferRequest entry;
@@ -179,17 +195,17 @@ TEST_F(TCPTransportTest, WriteAndReadtest) {
         entry.source = (uint8_t *)(addr) + kDataLength;
         entry.target_id = segment_id;
         entry.target_offset = remote_base;
-        ret = xport->submitTransfer(batch_id, {entry});
+        ret = engine->submitTransfer(batch_id, {entry});
         LOG_ASSERT(!ret);
         bool completed = false;
         TransferStatus status;
         while (!completed) {
-            int ret = xport->getTransferStatus(batch_id, 0, status);
+            int ret = engine->getTransferStatus(batch_id, 0, status);
             LOG_ASSERT(!ret);
             if (status.s == TransferStatusEnum::COMPLETED) completed = true;
             LOG_ASSERT(status.s != TransferStatusEnum::FAILED);
         }
-        ret = xport->freeBatchID(batch_id);
+        ret = engine->freeBatchID(batch_id);
         LOG_ASSERT(!ret);
     }
     LOG_ASSERT(0 == memcmp((uint8_t *)(addr), (uint8_t *)(addr) + kDataLength,
@@ -200,16 +216,12 @@ TEST_F(TCPTransportTest, WriteAndRead2test) {
     const size_t kDataLength = 4096000;
     void *addr = nullptr;
     const size_t ram_buffer_size = 1ull << 30;
-    auto metadata_client = std::make_shared<TransferMetadata>("127.0.0.1:2379");
-    LOG_ASSERT(metadata_client);
-
-    auto engine = std::make_unique<TransferEngine>(metadata_client);
-
-    auto hostname_port = parseHostNameWithPort("127.0.0.2:12345");
-    engine->init("127.0.0.2:12345", hostname_port.first.c_str(),
-                 hostname_port.second);
+    auto engine = std::make_unique<TransferEngine>();
+    auto hostname_port = parseHostNameWithPort(local_server_name);
+    engine->init(metadata_server, local_server_name,
+                 hostname_port.first.c_str(), hostname_port.second);
     Transport *xport = nullptr;
-    xport = engine->installOrGetTransport("tcp", nullptr);
+    xport = engine->installTransport("tcp", nullptr);
     LOG_ASSERT(xport != nullptr);
 
     addr = allocateMemoryPool(ram_buffer_size, 0, false);
@@ -218,12 +230,12 @@ TEST_F(TCPTransportTest, WriteAndRead2test) {
     for (size_t offset = 0; offset < kDataLength; ++offset)
         *((char *)(addr) + offset) = 'a' + lrand48() % 26;
 
-    auto segment_id = engine->openSegment("127.0.0.2:12345");
-    auto segment_desc = xport->meta()->getSegmentDescByID(segment_id);
+    auto segment_id = engine->openSegment(local_server_name);
+    auto segment_desc = engine->getMetadata()->getSegmentDescByID(segment_id);
     uint64_t remote_base = (uint64_t)segment_desc->buffers[0].addr;
 
     {
-        auto batch_id = xport->allocateBatchID(1);
+        auto batch_id = engine->allocateBatchID(1);
         int ret = 0;
         TransferRequest entry;
         entry.opcode = TransferRequest::WRITE;
@@ -231,22 +243,22 @@ TEST_F(TCPTransportTest, WriteAndRead2test) {
         entry.source = (uint8_t *)(addr);
         entry.target_id = segment_id;
         entry.target_offset = remote_base;
-        ret = xport->submitTransfer(batch_id, {entry});
+        ret = engine->submitTransfer(batch_id, {entry});
         LOG_ASSERT(!ret);
         bool completed = false;
         TransferStatus status;
         while (!completed) {
-            int ret = xport->getTransferStatus(batch_id, 0, status);
+            int ret = engine->getTransferStatus(batch_id, 0, status);
             ASSERT_EQ(ret, 0);
             LOG_ASSERT(status.s != TransferStatusEnum::FAILED);
             if (status.s == TransferStatusEnum::COMPLETED) completed = true;
         }
-        ret = xport->freeBatchID(batch_id);
+        ret = engine->freeBatchID(batch_id);
         ASSERT_EQ(ret, 0);
     }
 
     {
-        auto batch_id = xport->allocateBatchID(1);
+        auto batch_id = engine->allocateBatchID(1);
         int ret = 0;
         TransferRequest entry;
         entry.opcode = TransferRequest::READ;
@@ -254,17 +266,17 @@ TEST_F(TCPTransportTest, WriteAndRead2test) {
         entry.source = (uint8_t *)(addr) + kDataLength;
         entry.target_id = segment_id;
         entry.target_offset = remote_base;
-        ret = xport->submitTransfer(batch_id, {entry});
+        ret = engine->submitTransfer(batch_id, {entry});
         LOG_ASSERT(!ret);
         bool completed = false;
         TransferStatus status;
         while (!completed) {
-            int ret = xport->getTransferStatus(batch_id, 0, status);
+            int ret = engine->getTransferStatus(batch_id, 0, status);
             LOG_ASSERT(!ret);
             if (status.s == TransferStatusEnum::COMPLETED) completed = true;
             LOG_ASSERT(status.s != TransferStatusEnum::FAILED);
         }
-        ret = xport->freeBatchID(batch_id);
+        ret = engine->freeBatchID(batch_id);
         LOG_ASSERT(!ret);
     }
     LOG_ASSERT(0 == memcmp((uint8_t *)(addr), (uint8_t *)(addr) + kDataLength,
@@ -273,7 +285,7 @@ TEST_F(TCPTransportTest, WriteAndRead2test) {
     for (size_t offset = 0; offset < kDataLength; ++offset)
         *((char *)(addr) + offset) = 'a' + lrand48() % 26;
     {
-        auto batch_id = xport->allocateBatchID(1);
+        auto batch_id = engine->allocateBatchID(1);
         int ret = 0;
         TransferRequest entry;
         entry.opcode = TransferRequest::WRITE;
@@ -281,22 +293,22 @@ TEST_F(TCPTransportTest, WriteAndRead2test) {
         entry.source = (uint8_t *)(addr);
         entry.target_id = segment_id;
         entry.target_offset = remote_base;
-        ret = xport->submitTransfer(batch_id, {entry});
+        ret = engine->submitTransfer(batch_id, {entry});
         LOG_ASSERT(!ret);
         bool completed = false;
         TransferStatus status;
         while (!completed) {
-            int ret = xport->getTransferStatus(batch_id, 0, status);
+            int ret = engine->getTransferStatus(batch_id, 0, status);
             ASSERT_EQ(ret, 0);
             LOG_ASSERT(status.s != TransferStatusEnum::FAILED);
             if (status.s == TransferStatusEnum::COMPLETED) completed = true;
         }
-        ret = xport->freeBatchID(batch_id);
+        ret = engine->freeBatchID(batch_id);
         ASSERT_EQ(ret, 0);
     }
 
     {
-        auto batch_id = xport->allocateBatchID(1);
+        auto batch_id = engine->allocateBatchID(1);
         int ret = 0;
         TransferRequest entry;
         entry.opcode = TransferRequest::READ;
@@ -304,17 +316,17 @@ TEST_F(TCPTransportTest, WriteAndRead2test) {
         entry.source = (uint8_t *)(addr) + kDataLength;
         entry.target_id = segment_id;
         entry.target_offset = remote_base;
-        ret = xport->submitTransfer(batch_id, {entry});
+        ret = engine->submitTransfer(batch_id, {entry});
         LOG_ASSERT(!ret);
         bool completed = false;
         TransferStatus status;
         while (!completed) {
-            int ret = xport->getTransferStatus(batch_id, 0, status);
+            int ret = engine->getTransferStatus(batch_id, 0, status);
             LOG_ASSERT(!ret);
             if (status.s == TransferStatusEnum::COMPLETED) completed = true;
             LOG_ASSERT(status.s != TransferStatusEnum::FAILED);
         }
-        ret = xport->freeBatchID(batch_id);
+        ret = engine->freeBatchID(batch_id);
         LOG_ASSERT(!ret);
     }
     LOG_ASSERT(0 == memcmp((uint8_t *)(addr), (uint8_t *)(addr) + kDataLength,

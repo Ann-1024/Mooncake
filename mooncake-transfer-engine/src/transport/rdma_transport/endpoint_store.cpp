@@ -45,7 +45,7 @@ std::shared_ptr<RdmaEndPoint> FIFOEndpointStore::insertEndpoint(
     }
     auto endpoint = std::make_shared<RdmaEndPoint>(*context);
     if (!endpoint) {
-        PLOG(ERROR) << "Failed to allocate memory for RdmaEndPoint";
+        LOG(ERROR) << "Failed to allocate memory for RdmaEndPoint";
         return nullptr;
     }
     auto &config = globalConfig();
@@ -126,12 +126,12 @@ std::shared_ptr<RdmaEndPoint> SIEVEEndpointStore::insertEndpoint(
     RWSpinlock::WriteGuard guard(endpoint_map_lock_);
     if (endpoint_map_.find(peer_nic_path) != endpoint_map_.end()) {
         LOG(INFO) << "Endpoint " << peer_nic_path
-                  << " already exists in FIFOEndpointStore";
+                  << " already exists in SIEVEEndpointStore";
         return endpoint_map_[peer_nic_path].first;
     }
     auto endpoint = std::make_shared<RdmaEndPoint>(*context);
     if (!endpoint) {
-        PLOG(ERROR) << "Failed to allocate memory for RdmaEndPoint";
+        LOG(ERROR) << "Failed to allocate memory for RdmaEndPoint";
         return nullptr;
     }
     auto &config = globalConfig();

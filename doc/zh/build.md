@@ -30,6 +30,8 @@ $ pip install -e .
 - googletest: 1.12.x
 - gcc: 10.2.1
 - go: 1.19+
+- hiredis
+- curl
 
 ### 编译步骤
 
@@ -45,6 +47,8 @@ $ pip install -e .
                    libgtest-dev \
                    libjsoncpp-dev \
                    libnuma-dev \
+                   libcurl4-openssl-dev \
+                   libhiredis-dev
 
     # For centos/alibaba linux os
     yum install cmake \
@@ -57,6 +61,8 @@ $ pip install -e .
                 boost-devel \
                 openssl-devel \
                 protobuf-devel \
+                hiredis-devel \
+                libcurl-devel \
                 protobuf-compiler 
     ```
 
@@ -147,3 +153,5 @@ $ pip install -e .
 - `-DUSE_CXL=[ON|OFF]`: 启用 CXL 支持 
 - `-DWITH_P2P_STORE=[ON|OFF]`: 启用 Golang 支持并编译 P2P Store 组件，注意 go 1.19+
 - `-DWITH_WITH_RUST_EXAMPLE=[ON|OFF]`: 启用 Rust 支持
+- `-DUSE_REDIS=[ON|OFF]`: 启用基于 Redis 的元数据服务
+- `-DUSE_HTTP=[ON|OFF]`: 启用基于 Http 的元数据服务

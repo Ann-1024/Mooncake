@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(mooncake CXX C)
 
+enable_testing()
+
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_CXX_STANDARD 17)
 
@@ -26,6 +28,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(USE_CUDA "option for using gpu direct" OFF)
 option(USE_CXL "option for using cxl protocol" OFF)
+option(USE_REDIS "option for enable redis as metadata server" OFF)
+option(USE_HTTP "option for enable http as metadata server" OFF)
 
 option(WITH_P2P_STORE "build p2p store library and sample code" OFF)
 option(WITH_RUST_EXAMPLE "build the Rust interface and sample code for the transfer engine" OFF)
@@ -33,6 +37,17 @@ option(WITH_RUST_EXAMPLE "build the Rust interface and sample code for the trans
 if (USE_CUDA)
   add_compile_definitions(USE_CUDA)
   message(STATUS "CUDA support is enabled")
+  include_directories(/usr/local/cuda/include)
+endif()
+
+if (USE_REDIS)
+  add_compile_definitions(USE_REDIS)
+  message(STATUS "Redis as metadata server support is enabled")
+endif()
+
+if (USE_HTTP)
+  add_compile_definitions(USE_HTTP)
+  message(STATUS "Http as metadata server support is enabled")
 endif()
 
 add_subdirectory(mooncake-transfer-engine)

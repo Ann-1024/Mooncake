@@ -61,6 +61,8 @@ For instance, as illustrated in figure above, to transfer data from buffer 0 (as
 To further maximize bandwidth utilization, if a single request's transfer is internally divided into multiple slices if its length exeeds 16KB. 
 Each slice might use a different path, enabling collaborative work among all RDMA NICs.
 
+If you do not want to manually configure the topology matrix, we also provide a function (`mooncake::discoverTopologyMatrix` in `topology.h`) to automatically discover the toplogy between CPU/CUDA and RDMA devices. Supports for more device types are working in progress. The automatic discovery mechanism might not always be accurate, and we welcome your feedbacks and improvement ideas!
+
 ### Endpoint Management
 Mooncake Store employs a pair of end-
 points to represent the connection between a local RDMA
@@ -92,29 +94,46 @@ The sample program provided in `mooncake-transfer-engine/example/transfer_engine
 
 After successfully compiling Transfer Engine, the test program `transfer_engine_bench` can be found in the `build/mooncake-transfer-engine/example` directory.
 
-1. **Start the `etcd` service.** This service is used for the centralized highly available management of various metadata for Mooncake, including the internal connection status of Transfer Engine. It is necessary to ensure that both the initiator and target nodes can smoothly access this etcd service, so pay attention to:
-   - The listening IP of the etcd service should not be 127.0.0.1; it should be determined in conjunction with the network environment. In the experimental environment, 0.0.0.0 can be used. For example, the following command line can be used to start the required service:
+1. **Start the `metadata` service.** This service is used for the centralized highly available management of various metadata for Mooncake, including the internal connection status of Transfer Engine. It is necessary to ensure that both the initiator and target nodes can smoothly access this metadata service, so pay attention to:
+   - The listening IP of the metadata service should not be 127.0.0.1; it should be determined in conjunction with the network environment. In the experimental environment, 0.0.0.0 can be used.
+   - On some platforms, if the initiator and target nodes have set the `http_proxy` or `https_proxy` environment variables, it will also affect the communication between Transfer Engine and the metadata service.
+
+   Transfer Engine support multiple kinds of metadata services, including `etcd`, `redis`, and `http`. The following describes how to start the metadata service using `etcd` and `http` as examples.
+
+   1.1. **`etcd`**
+
+   For example, the following command line can be used to start the etcd service:
       ```bash
       # This is 10.0.0.1
       etcd --listen-client-urls http://0.0.0.0:2379  --advertise-client-urls http://10.0.0.1:2379
       ```
-   - On some platforms, if the initiator and target nodes have set the `http_proxy` or `https_proxy` environment variables, it will also affect the communication between Transfer Engine and the etcd service, reporting the "Error from etcd client: 14" error.
+
+   1.2. **`http`**
+
+   For example, you can use the `http` service in the `mooncake-transfer-engine/example/http-metadata-server` example:
+      ```bash
+      # This is 10.0.0.1
+      # cd mooncake-transfer-engine/example/http-metadata-server
+      go run . --addr=:8080
+      ```
 
 2. **Start the target node.**
     ```bash
     # This is 10.0.0.2
     export MC_GID_INDEX=n
     ./transfer_engine_bench --mode=target \
-                            --metadata_server=10.0.0.1:2379 \
+                            --metadata_server=etcd://10.0.0.1:2379 \
                             --local_server_name=10.0.0.2:12345 \
                             --device_name=erdma_0
     ```
    The meanings of the various parameters are as follows:
-   - The default value of the parameter corresponding to the environment variable `MC_GID_INDEX` is 0, which means that the Transfer Engine selects a GID that is most likely to be connected.
-     If the connection is hung, the user still needs to set the value of such a environment variable manually.
+   - The default value of the parameter corresponding to the environment variable `MC_GID_INDEX` is 0, which means that the Transfer Engine selects a GID that is most likely to be connected. Since this parameter depends on the specific network environment, the user has to set the value of the environment variable manually if the connection is hung. The environment variable `NCCL_IB_GID_INDEX` is equivalent to this function.
    - `--mode=target` indicates the start of the target node. The target node does not initiate read/write requests; it passively supplies or writes data as required by the initiator node.
       > Note: In actual applications, there is no need to distinguish between target nodes and initiator nodes; each node can freely initiate read/write requests to other nodes in the cluster.
-   - `--metadata_server` is the address of the metadata server (the full address of the etcd service).
+   - `--metadata_server` is the address of the metadata server. Its form is `[proto]://[hostname:port]`. For example, the following addresses are VALID:
+      - Use `etcd` as metadata storage: `"10.0.0.1:2379"`, `"etcd://10.0.0.1:2379"` or `"etcd://10.0.0.1:2379,10.0.0.2:2379"`
+      - Use `redis` as metadata storage: `"redis://10.0.0.1:6379"`
+      - Use `http` as metadata storage: `"http://10.0.0.1:8080/metadata"`
    - `--local_server_name` represents the address of this machine, which does not need to be set in most cases. If this option is not set, the value is equivalent to the hostname of this machine (i.e., `hostname(2)`). Other nodes in the cluster will use this address to attempt out-of-band communication with this node to establish RDMA connections.
       > Note: If out-of-band communication fails, the connection cannot be established. Therefore, if necessary, you need to modify the `/etc/hosts` file on all nodes in the cluster to locate the correct node through the hostname.
    - `--device_name` indicates the name of the RDMA network card used in the transfer process.
@@ -150,11 +169,11 @@ Transfer Engine provides interfaces through the `TransferEngine` class (located 
 
 ### Data Transfer
 
-#### Transport::TransferRequest
+#### TransferEngine::TransferRequest
 
-The core API provided by Mooncake Transfer Engine is submitting a group of asynchronous `Transport::TransferRequest` tasks through the `Transport::submitTransfer` interface, and querying their status through the `Transport::getTransferStatus` interface. Each `Transport::TransferRequest` specifies reading or writing a continuous data space of `length` starting from the local starting address `source`, to the position starting at `target_offset` in the segment corresponding to `target_id`.
+The core API provided by Mooncake Transfer Engine is submitting a group of asynchronous `TransferRequest` tasks through the `submitTransfer` interface, and querying their status through the `getTransferStatus` interface. Each `TransferRequest` specifies reading or writing a continuous data space of `length` starting from the local starting address `source`, to the position starting at `target_offset` in the segment corresponding to `target_id`.
 
-The `Transport::TransferRequest` structure is defined as follows:
+The `TransferRequest` structure is defined as follows:
 
 ```cpp
 using SegmentID = int32_t;
@@ -176,7 +195,7 @@ struct TransferRequest
   - NVMeOF space type, where each file corresponds to a segment. In this case, the segment name passed to the `openSegment` interface is equivalent to the unique identifier of the file. `target_offset` is the offset of the target file.
 - `length` represents the amount of data transferred. TransferEngine may further split this into multiple read/write requests internally.
 
-#### Transport::allocateBatchID
+#### TransferEngine::allocateBatchID
 
 ```cpp
 BatchID allocateBatchID(size_t batch_size);
@@ -187,7 +206,7 @@ Allocates a `BatchID`. A maximum of `batch_size` `TransferRequest`s can be submi
 - `batch_size`: The maximum number of `TransferRequest`s that can be submitted under the same `BatchID`;
 - Return value: If successful, returns `BatchID` (non-negative); otherwise, returns a negative value.
 
-#### Transport::submitTransfer
+#### TransferEngine::submitTransfer
 
 ```cpp
 int submitTransfer(BatchID batch_id, const std::vector<TransferRequest> &entries);
@@ -199,7 +218,7 @@ Submits new `TransferRequest` tasks to `batch_id`. The task is asynchronously su
 - `entries`: Array of `TransferRequest`;
 - Return value: If successful, returns 0; otherwise, returns a negative value.
 
-#### Transport::getTransferStatus
+#### TransferEngine::getTransferStatus
 
 ```cpp
 enum TaskStatus
@@ -226,7 +245,7 @@ Obtains the running status of the `TransferRequest` with `task_id` in `batch_id`
 - `status`: Output Transfer status;
 - Return value: If successful, returns 0; otherwise, returns a negative value.
 
-#### Transport::freeBatchID
+#### TransferEngine::freeBatchID
 
 ```cpp
 int freeBatchID(BatchID batch_id);
@@ -240,9 +259,9 @@ Recycles `BatchID`, and subsequent operations on `submitTransfer` and `getTransf
 ### Multi-Transport Management
 The `TransferEngine` class internally manages multiple backend `Transport` classes, and users can load or unload `Transport` for different backends in `TransferEngine`.
 
-#### TransferEngine::installOrGetTransport
+#### TransferEngine::installTransport
 ```cpp
-Transport* installOrGetTransport(const std::string& proto, void** args);
+Transport* installTransport(const std::string& proto, void** args);
 ```
 
 Registers `Transport` in `TransferEngine`. If a `Transport` for a certain protocol already exists, it returns that `Transport`.
@@ -254,7 +273,7 @@ Registers `Transport` in `TransferEngine`. If a `Transport` for a certain protoc
 ##### TCP Transfer Mode
 For TCP transfer mode, there is no need to pass `args` objects when registering the `Transport` object.
 ```cpp
-engine->installOrGetTransport("tcp", nullptr);
+engine->installTransport("tcp", nullptr);
 ```
 
 ##### RDMA Transfer Mode
@@ -263,7 +282,7 @@ For RDMA transfer mode, the network card priority marrix must be specified throu
 void** args = (void**) malloc(2 * sizeof(void*));
 args[0] = /* topology matrix */;
 args[1] = nullptr;
-engine->installOrGetTransport("rdma", args);
+engine->installTransport("rdma", args);
 ```
 The network card priority marrix is a JSON string indicating the storage medium name and the list of network cards to be used preferentially, as shown in the example below:
 ```json
@@ -284,7 +303,7 @@ For NVMeOF transfer mode, the file path must be specified through `args` during 
 void** args = (void**) malloc(2 * sizeof(void*));
 args[0] = /* topology matrix */;
 args[1] = nullptr;
-engine->installOrGetTransport("nvmeof", args);
+engine->installTransport("nvmeof", args);
 ```
 
 #### TransferEngine::uninstallTransport
@@ -310,7 +329,7 @@ Registers a space starting at address `addr` with a length of `size` on the loca
 
 - `addr`: The starting address of the registration space;
 - `size`: The length of the registration space;
-- `location`: The `device` corresponding to this memory segment, such as `cuda:0` indicating the GPU device, `cpu:0` indicating the CPU socket, by matching with the network card priority order table (see `installOrGetTransport`), the preferred network card is identified.
+- `location`: The `device` corresponding to this memory segment, such as `cuda:0` indicating the GPU device, `cpu:0` indicating the CPU socket, by matching with the network card priority order table (see `installTransport`), the preferred network card is identified.
 - `remote_accessible`: Indicates whether this memory can be accessed by remote nodes.
 - Return value: If successful, returns 0; otherwise, returns a negative value.
 
@@ -325,7 +344,7 @@ Unregisters the region.
 - `addr`: The starting address of the registration space;
 - Return value: If successful, returns 0; otherwise, returns a negative value.
 
-### Segment Management and etcd Metadata
+### Segment Management and Metadata Format
 
 TransferEngine provides the `openSegment` function, which obtains a `SegmentHandle` for subsequent `Transport` transfers.
 ```cpp
@@ -343,7 +362,7 @@ int closeSegment(SegmentHandle segment_id);
 - Return value: If successful, returns 0; otherwise, returns a negative value.
 
 <details>
-<summary><strong>etcd Metadata Form</strong></summary>
+<summary><strong>Metadata Format</strong></summary>
 
 ```
 // Used to find the communicable address and exposed rpc port based on server_name.
@@ -412,22 +431,35 @@ Value = {
 ```
 </details>
 
+### HTTP Metadata Server
+
+The HTTP server should implement three following RESTful APIs, while the metadata server configured to `http://host:port/metadata` as an example:
+
+1. `GET /metadata?key=$KEY`: Get the metadata corresponding to `$KEY`.
+2. `PUT /metadata?key=$KEY`: Update the metadata corresponding to `$KEY` to the value of the request body.
+3. `DELETE /metadata?key=$KEY`: Delete the metadata corresponding to `$KEY`.
+
+For specific implementation, refer to the demo service implemented in Golang at [mooncake-transfer-engine/example/http-metadata-server](../../mooncake-transfer-engine/example/http-metadata-server).
+
 ### Initialization
 
+TransferEngine needs to initializing by calling the `init` method before further actions:
 ```cpp
-TransferEngine(std::unique_ptr<TransferMetadata> metadata_client);
-TransferMetadata(const std::string &metadata_server);
+TransferEngine();
+
+int init(const std::string &metadata_conn_string,
+         const std::string &local_server_name,
+         const std::string &ip_or_host_name, 
+         uint64_t rpc_port = 12345);
 ```
+- `metadata_conn_string`: Connecting string of metadata storage servers, i.e., the IP address/hostname of `etcd`/`redis` or the URI of the http service.
+The general form is `[proto]://[hostname:port]`. For example, the following metadata server addresses are legal:
+    - Using `etcd` as a metadata storage service: `“10.0.0.1:2379”` or `“etcd://10.0.0.1:2379”`.
+    - Using `redis` as a metadata storage service: `“redis://10.0.0.1:6379”`
+    - Using `http` as a metadata storage service: `“http://10.0.0.1:8080/metadata”`
 
-- Pointer to a `TransferMetadata` object, which abstracts the communication logic between the TransferEngine framework and the metadata server/etcd, facilitating user deployment in different environments. `metadata_server` represents the IP address or hostname of the etcd server.
-
-For easy exception handling, TransferEngine needs to call the init function for secondary construction after construction:
-```cpp
-int init(std::string& server_name, std::string& connectable_name, uint64_t rpc_port = 12345);
-```
-
-- `server_name`: The local server name, ensuring uniqueness within the cluster. It also serves as the name of the RAM Segment that other nodes refer to the current instance (i.e., Segment Name).
-- `connectable_name`: The name used for other clients to connect, which can be a hostname or IP address.
+- `local_server_name`: The local server name, ensuring uniqueness within the cluster. It also serves as the name of the RAM Segment that other nodes refer to the current instance (i.e., Segment Name).
+- `ip_or_host_name`: The name used for other clients to connect, which can be a hostname or IP address.
 - `rpc_port`: The rpc port used for interaction with other clients.
 - Return value: If successful, returns 0; if TransferEngine has already been init, returns -1.
 
@@ -454,7 +486,7 @@ To support the operational needs of P2P Store, Transfer Engine provides a Golang
 When compiling the project, enable the `-DWITH_P2P_STORE=ON` option to compile the P2P Store example program at the same time.
 
 ### Using Rust Interface
-Under `mooncake-transfer-engine/example/rust-example`, the Rust interface implementation of TransferEngine is provided, and a Rust version of the benchmark is implemented based on the interface, similar to [transfer_engine_bench.cpp](../../../mooncake-transfer-engine/example/transfer_engine_bench.cpp). To compile rust-example, you need to install the Rust SDK and add `-DWITH_RUST_EXAMPLE=ON` in the cmake command.
+Under `mooncake-transfer-engine/rust`, the Rust interface implementation of TransferEngine is provided, and a Rust version of the benchmark is implemented based on the interface, similar to [transfer_engine_bench.cpp](../../mooncake-transfer-engine/example/transfer_engine_bench.cpp). To compile the rust example, you need to install the Rust SDK and add `-DWITH_RUST_EXAMPLE=ON` in the cmake command.
 
 ## Advanced Runtime Options
 For advanced users, TransferEngine provides the following advanced runtime options, all of which can be passed in through **environment variables**.
