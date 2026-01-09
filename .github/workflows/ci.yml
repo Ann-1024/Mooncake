@@ -2,9 +2,9 @@ name: 'Build & Test (Linux)'
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "fix_ci_dev" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "fix_ci_dev" ]
     types: [opened, synchronize, reopened, labeled]
   pull_request_target:
     branches: [ "fix_ci_dev" ]
